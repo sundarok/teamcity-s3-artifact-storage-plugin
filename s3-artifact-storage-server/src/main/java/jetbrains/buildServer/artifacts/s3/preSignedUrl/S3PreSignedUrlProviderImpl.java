@@ -8,6 +8,8 @@ import com.intellij.openapi.diagnostic.Logger;
 import com.intellij.openapi.util.text.StringUtil;
 import jetbrains.buildServer.artifacts.s3.S3Constants;
 import jetbrains.buildServer.artifacts.s3.S3Util;
+import jetbrains.buildServer.artifacts.s3.util.ParamUtil;
+import jetbrains.buildServer.serverSide.ServerPaths;
 import jetbrains.buildServer.serverSide.TeamCityProperties;
 import jetbrains.buildServer.util.amazon.AWSCommonParams;
 import jetbrains.buildServer.util.amazon.AWSException;
@@ -24,8 +26,13 @@ import java.util.concurrent.TimeUnit;
  */
 public class S3PreSignedUrlProviderImpl implements S3PreSignedUrlProvider {
   private static final Logger LOG = Logger.getInstance(S3PreSignedUrlProviderImpl.class.getName());
-
   private static final String TEAMCITY_S3_PRESIGNURL_GET_CACHE_ENABLED = "teamcity.s3.presignurl.get.cache.enabled";
+
+  private final ServerPaths myServerPaths;
+
+  public S3PreSignedUrlProviderImpl(@NotNull ServerPaths serverPaths) {
+    myServerPaths = serverPaths;
+  }
 
   private final Cache<String, String> myGetLinksCache = CacheBuilder.newBuilder()
     .expireAfterWrite(getUrlLifetimeSec(), TimeUnit.SECONDS)
@@ -41,7 +48,7 @@ public class S3PreSignedUrlProviderImpl implements S3PreSignedUrlProvider {
   @Override
   public String getPreSignedUrl(@NotNull HttpMethod httpMethod, @NotNull String bucketName, @NotNull String objectKey, @NotNull Map<String, String> params) throws IOException {
     try {
-      final Callable<String> resolver = () -> S3Util.withS3Client(params, client -> {
+      final Callable<String> resolver = () -> S3Util.withS3Client(ParamUtil.putSslValues(myServerPaths, params), client -> {
         final GeneratePresignedUrlRequest request = new GeneratePresignedUrlRequest(bucketName, objectKey, httpMethod)
           .withExpiration(new Date(System.currentTimeMillis() + getUrlLifetimeSec() * 1000));
         return client.generatePresignedUrl(request).toString();
@@ -54,13 +61,17 @@ public class S3PreSignedUrlProviderImpl implements S3PreSignedUrlProvider {
         return resolver.call();
       }
     } catch (Exception e) {
-      final AWSException awsException = new AWSException(e.getCause());
-      if (StringUtil.isNotEmpty(awsException.getDetails())) {
-        LOG.warn(awsException.getDetails());
+      final Throwable cause = e.getCause();
+      final AWSException awsException = cause != null ? new AWSException(cause) : new AWSException(e);
+      final String details = awsException.getDetails();
+      if (StringUtil.isNotEmpty(details)) {
+        final String message = awsException.getMessage() + details;
+        LOG.warn(message);
       }
-      final String err = "Failed to create " + httpMethod.name() + " pre-signed URL for [" + objectKey + "] in bucket [" + bucketName + "]";
-      LOG.infoAndDebugDetails(err, awsException);
-      throw new IOException(err + ": " + awsException.getMessage(), awsException);
+      throw new IOException(String.format(
+        "Failed to create pre-signed URL to %s artifact '%s' in bucket '%s': %s",
+        httpMethod.name().toLowerCase(), objectKey, bucketName, awsException.getMessage()
+      ), awsException);
     }
   }
 

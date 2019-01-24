@@ -8,9 +8,12 @@ import jetbrains.buildServer.artifacts.ArtifactListData;
 import jetbrains.buildServer.artifacts.ServerArtifactStorageSettingsProvider;
 import jetbrains.buildServer.artifacts.s3.S3Constants;
 import jetbrains.buildServer.artifacts.s3.S3Util;
+import jetbrains.buildServer.artifacts.s3.util.ParamUtil;
 import jetbrains.buildServer.log.Loggers;
 import jetbrains.buildServer.serverSide.SBuild;
 import jetbrains.buildServer.serverSide.SFinishedBuild;
+import jetbrains.buildServer.serverSide.ServerPaths;
+import jetbrains.buildServer.serverSide.TeamCityProperties;
 import jetbrains.buildServer.serverSide.artifacts.ServerArtifactHelper;
 import jetbrains.buildServer.serverSide.cleanup.BuildCleanupContext;
 import jetbrains.buildServer.serverSide.cleanup.CleanupExtension;
@@ -27,7 +30,9 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 /**
  * Created by Nikita.Skvortsov
@@ -37,10 +42,15 @@ public class S3CleanupExtension implements CleanupExtension, PositionAware {
 
   @NotNull private final ServerArtifactStorageSettingsProvider mySettingsProvider;
   @NotNull private final ServerArtifactHelper myHelper;
+  @NotNull private final ServerPaths myServerPaths;
 
-  public S3CleanupExtension(@NotNull ServerArtifactHelper helper, @NotNull ServerArtifactStorageSettingsProvider settingsProvider) {
+  public S3CleanupExtension(
+    @NotNull ServerArtifactHelper helper,
+    @NotNull ServerArtifactStorageSettingsProvider settingsProvider,
+    @NotNull ServerPaths serverPaths) {
     myHelper = helper;
     mySettingsProvider = settingsProvider;
+    myServerPaths = serverPaths;
   }
 
   @Override
@@ -60,20 +70,27 @@ public class S3CleanupExtension implements CleanupExtension, PositionAware {
         final Map<String, String> params = S3Util.validateParameters(mySettingsProvider.getStorageSettings(build));
 
         final String bucketName = S3Util.getBucketName(params);
-        S3Util.withS3Client(params, client -> {
+        S3Util.withS3Client(ParamUtil.putSslValues(myServerPaths, params), client -> {
           final String suffix = " from S3 bucket [" + bucketName + "]" + " from path [" + pathPrefix + "]";
 
-          int succeededNum = 0;
-          int errorNum = 0;
+          final AtomicInteger succeededNum = new AtomicInteger();
+          final AtomicInteger errorNum = new AtomicInteger();
 
-          for (List<String> part: Lists.partition(toDelete, 1000)) {
+          final int batchSize = TeamCityProperties.getInteger(S3Constants.S3_CLEANUP_BATCH_SIZE, 1000);
+          final boolean useParallelStream = TeamCityProperties.getBooleanOrTrue(S3Constants.S3_CLEANUP_USE_PARALLEL);
+          final List<List<String>> partitions = Lists.partition(toDelete, batchSize);
+          final Stream<List<String>> listStream = partitions.size() > 1 && useParallelStream
+            ? partitions.parallelStream()
+            : partitions.stream();
+
+          listStream.forEach(part -> {
             try {
               final DeleteObjectsRequest deleteObjectsRequest = new DeleteObjectsRequest(bucketName)
                 .withKeys(part.stream().map(path -> new DeleteObjectsRequest.KeyVersion(pathPrefix + path)).collect(Collectors.toList()));
 
-              succeededNum += client.deleteObjects(deleteObjectsRequest).getDeletedObjects().size();
+              succeededNum.addAndGet(client.deleteObjects(deleteObjectsRequest).getDeletedObjects().size());
             } catch (MultiObjectDeleteException e) {
-              succeededNum += e.getDeletedObjects().size();
+              succeededNum.addAndGet(e.getDeletedObjects().size());
 
               final List<MultiObjectDeleteException.DeleteError> errors = e.getErrors();
               errors.forEach(error -> {
@@ -83,15 +100,15 @@ public class S3CleanupExtension implements CleanupExtension, PositionAware {
                   toDelete.remove(key.substring(pathPrefix.length()));
                 }
               });
-              errorNum += errors.size();
+              errorNum.addAndGet(errors.size());
             }
+          });
+
+          if (errorNum.get() > 0) {
+            buildCleanupContext.getErrorReporter().buildCleanupError(build.getBuildId(), "Failed to remove [" + errorNum + "] s3 " + StringUtil.pluralize("object", errorNum.get()) + suffix);
           }
 
-          if (errorNum > 0) {
-            buildCleanupContext.getErrorReporter().buildCleanupError(build.getBuildId(), "Failed to remove [" + errorNum + "] s3 " + StringUtil.pluralize("object", errorNum) + suffix);
-          }
-
-          Loggers.CLEANUP.info("Removed [" + succeededNum + "] s3 " + StringUtil.pluralize("object", succeededNum) + suffix);
+          Loggers.CLEANUP.info("Removed [" + succeededNum + "] s3 " + StringUtil.pluralize("object", succeededNum.get()) + suffix);
 
           myHelper.removeFromArtifactList(build, toDelete);
 

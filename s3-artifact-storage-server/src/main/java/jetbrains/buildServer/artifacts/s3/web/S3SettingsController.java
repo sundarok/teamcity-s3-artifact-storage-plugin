@@ -7,9 +7,11 @@ import java.util.Map;
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 import jetbrains.buildServer.artifacts.s3.S3Constants;
+import jetbrains.buildServer.artifacts.s3.util.ParamUtil;
 import jetbrains.buildServer.controllers.ActionErrors;
 import jetbrains.buildServer.controllers.BaseFormXmlController;
 import jetbrains.buildServer.controllers.BasePropertiesBean;
+import jetbrains.buildServer.serverSide.ServerPaths;
 import jetbrains.buildServer.web.openapi.PluginDescriptor;
 import jetbrains.buildServer.web.openapi.WebControllerManager;
 import org.jdom.Element;
@@ -21,9 +23,12 @@ public class S3SettingsController extends BaseFormXmlController {
   private final static Logger LOG = Logger.getInstance(S3SettingsController.class.getName());
   private static final String FAILED_TO_PROCESS_REQUEST_FORMAT = "Failed to process '%s' request: ";
   private final Map<String, ResourceHandler> myHandlers = new HashMap<>();
+  private final ServerPaths myServerPaths;
 
-  public S3SettingsController(WebControllerManager manager,
-                              PluginDescriptor descriptor) {
+  public S3SettingsController(@NotNull final WebControllerManager manager,
+                              @NotNull final PluginDescriptor descriptor,
+                              @NotNull final ServerPaths serverPaths) {
+    myServerPaths = serverPaths;
     final String path = descriptor.getPluginResourcesPath(S3Constants.S3_SETTINGS_PATH + ".html");
     manager.registerController(path, this);
     myHandlers.put("buckets", new BucketsResourceHandler());
@@ -41,7 +46,7 @@ public class S3SettingsController extends BaseFormXmlController {
                         @NotNull final HttpServletResponse response,
                         @NotNull final Element xmlResponse) {
     final ActionErrors errors = new ActionErrors();
-    final Map<String, String> parameters = getProperties(request);
+    final Map<String, String> parameters = ParamUtil.putSslValues(myServerPaths, getProperties(request));
 
     final String resource = request.getParameter("resource");
     if (resource == null) {
@@ -54,8 +59,12 @@ public class S3SettingsController extends BaseFormXmlController {
         try {
           xmlResponse.addContent(handler.getContent(parameters));
         } catch (IllegalArgumentException e) {
-          final String message = String.format(FAILED_TO_PROCESS_REQUEST_FORMAT, resource) + e.getMessage();
-          LOG.info(message);
+          final String message = String.format(FAILED_TO_PROCESS_REQUEST_FORMAT, resource);
+          if (LOG.isDebugEnabled()) {
+            LOG.debug(message, e);
+          } else {
+            LOG.info(message + e.getMessage());
+          }
           errors.addError(resource, message);
         } catch (Throwable e) {
           final StringBuilder messageBuilder = new StringBuilder(String.format(FAILED_TO_PROCESS_REQUEST_FORMAT, resource));

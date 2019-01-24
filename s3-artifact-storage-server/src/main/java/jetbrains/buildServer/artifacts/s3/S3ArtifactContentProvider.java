@@ -2,6 +2,8 @@ package jetbrains.buildServer.artifacts.s3;
 
 import com.intellij.openapi.diagnostic.Logger;
 import jetbrains.buildServer.artifacts.ArtifactData;
+import jetbrains.buildServer.artifacts.s3.util.ParamUtil;
+import jetbrains.buildServer.serverSide.ServerPaths;
 import jetbrains.buildServer.serverSide.artifacts.ArtifactContentProvider;
 import jetbrains.buildServer.serverSide.artifacts.StoredBuildArtifactInfo;
 import jetbrains.buildServer.util.StringUtil;
@@ -18,7 +20,11 @@ import java.util.Map;
 public class S3ArtifactContentProvider implements ArtifactContentProvider {
 
   private final static Logger LOG = Logger.getInstance(S3ArtifactContentProvider.class.getName());
-  public static final String NETWORK_PROBLEM_MESSAGE = "Unable to execute HTTP request";
+  private final ServerPaths myServerPaths;
+
+  public S3ArtifactContentProvider(@NotNull ServerPaths serverPaths) {
+    myServerPaths = serverPaths;
+  }
 
   @NotNull
   @Override
@@ -46,21 +52,21 @@ public class S3ArtifactContentProvider implements ArtifactContentProvider {
     final String key = S3Util.getPathPrefix(storedBuildArtifactInfo.getCommonProperties()) + artifactPath;
 
     try {
-      return S3Util.withS3Client(params, client -> client.getObject(bucketName, key).getObjectContent());
+      return S3Util.withS3Client(
+        ParamUtil.putSslValues(myServerPaths, params),
+        client -> client.getObject(bucketName, key).getObjectContent()
+      );
     } catch (Throwable t) {
       final AWSException awsException = new AWSException(t);
-
       final String details = awsException.getDetails();
       if (StringUtil.isNotEmpty(details)) {
         final String message = awsException.getMessage() + details;
         LOG.warn(message);
       }
-
-      if (awsException.getMessage().contains(NETWORK_PROBLEM_MESSAGE)) {
-        throw new IOException("Failed to get artifact " + artifactPath + " content: Unable to connect to the AWS S3 storage");
-      }
-
-      throw new IOException("Failed to get artifact " + artifactPath + " content: " + awsException.getMessage(), awsException);
+      throw new IOException(String.format(
+        "Failed to get artifact '%s' content in bucket '%s': %s",
+        artifactPath, bucketName, awsException.getMessage()
+      ), awsException);
     }
   }
 }

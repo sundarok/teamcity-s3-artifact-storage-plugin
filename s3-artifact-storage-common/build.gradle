@@ -1,0 +1,24 @@
+plugins{
+    id 'com.github.rodm.teamcity-common' version "1.1.1"
+}
+
+dependencies {
+    compile "jetbrains.buildServer.util:amazon-util:23"
+    testCompile "org.testng:testng:6.8.21"
+}
+
+teamcity {
+    version = teamcityVersion
+}
+
+tasks.withType(JavaCompile) {
+    sourceCompatibility = "1.6"
+    targetCompatibility = "1.6"
+
+    if (project.hasProperty('JDK_16')) {
+        options.bootstrapClasspath = layout.files(
+                "$JDK_16/jre/lib/rt.jar",
+                "$JDK_16/jre/lib/jsse.jar"
+        )
+    }
+}
